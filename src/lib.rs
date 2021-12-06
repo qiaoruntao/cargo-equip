@@ -2,21 +2,14 @@
 #![warn(rust_2018_idioms)]
 #![recursion_limit = "256"]
 
-mod cargo_udeps;
-mod process;
-mod ra_proc_macro;
-mod rust;
-mod rustfmt;
-pub mod shell;
-mod toolchain;
-mod workspace;
-
-use crate::{
-    ra_proc_macro::ProcMacroExpander,
-    rust::CodeEdit,
-    shell::Shell,
-    workspace::{MetadataExt as _, PackageExt as _, PackageIdExt as _, TargetExt as _},
+use std::{
+    cmp,
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    fmt::Debug,
+    path::{Path, PathBuf},
+    str::FromStr,
 };
+
 use anyhow::Context as _;
 use cargo_metadata as cm;
 use indoc::indoc;
@@ -29,49 +22,58 @@ use petgraph::{
 };
 use prettytable::{cell, format::FormatBuilder, row, Table};
 use quote::quote;
-use std::{
-    cmp,
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
-    fmt::Debug,
-    path::{Path, PathBuf},
-    str::FromStr,
-};
 use structopt::{clap::AppSettings, StructOpt};
+
+use crate::{
+    ra_proc_macro::ProcMacroExpander,
+    rust::CodeEdit,
+    shell::Shell,
+    workspace::{MetadataExt as _, PackageExt as _, PackageIdExt as _, TargetExt as _},
+};
+
+mod cargo_udeps;
+mod process;
+mod ra_proc_macro;
+mod rust;
+mod rustfmt;
+pub mod shell;
+mod toolchain;
+mod workspace;
 
 // We need to prepend " " to `long_help`s.
 // https://github.com/BurntSushi/ripgrep/blob/9eddb71b8e86a04d7048b920b9b50a2e97068d03/crates/core/app.rs#L533-L539
 
 #[derive(StructOpt, Debug)]
 #[structopt(
-    author("Ryo Yamashita <qryxip@gmail.com>"),
-    about("Please run as `cargo equip`, not `cargo-equip`."),
-    bin_name("cargo"),
-    global_settings(&[AppSettings::DeriveDisplayOrder, AppSettings::UnifiedHelpMessage])
+author("Ryo Yamashita <qryxip@gmail.com>"),
+about("Please run as `cargo equip`, not `cargo-equip`."),
+bin_name("cargo"),
+global_settings(& [AppSettings::DeriveDisplayOrder, AppSettings::UnifiedHelpMessage])
 )]
 pub enum Opt {
     #[structopt(
-        about(indoc! {r#"
+    about(indoc ! {r#"
 
             A Cargo subcommand to bundle your code into one `.rs` file for competitive programming.
 
             Use -h for short descriptions and --help for more detials.
         "#}),
-        author("Ryo Yamashita <qryxip@gmail.com>"),
-        usage(
-            r#"cargo equip [OPTIONS]
+    author("Ryo Yamashita <qryxip@gmail.com>"),
+    usage(
+    r#"cargo equip [OPTIONS]
     cargo equip [OPTIONS] --lib
     cargo equip [OPTIONS] --bin <NAME>
     cargo equip [OPTIONS] --example <NAME>
     cargo equip [OPTIONS] --src <PATH>"#,
-        )
+    )
     )]
     Equip {
         /// Bundle the lib/bin/example target and its dependencies
         #[structopt(
-            long,
-            value_name("PATH"),
-            conflicts_with_all(&["lib", "bin", "example"]),
-            long_help(indoc! {r#"
+        long,
+        value_name("PATH"),
+        conflicts_with_all(& ["lib", "bin", "example"]),
+        long_help(indoc ! {r#"
                 Bundle the lib/bin/example target and its dependencies.
 
                 This option is intended to be used from editors such as VSCode. Use `--lib`, `--bin` or `--example` for normal usage.
@@ -80,7 +82,7 @@ pub enum Opt {
         src: Option<PathBuf>,
 
         /// Bundle the library and its dependencies
-        #[structopt(long, conflicts_with_all(&["bin", "example"]))]
+        #[structopt(long, conflicts_with_all(& ["bin", "example"]))]
         lib: bool,
 
         /// Bundle the binary and its dependencies
@@ -101,46 +103,46 @@ pub enum Opt {
 
         /// Alias for `--exclude {crates available on AtCoder}`
         #[structopt(
-            long,
-            long_help(Box::leak(
-                format!(
-                    "Alias for:\n--exclude {}\n ",
-                    ATCODER_CRATES.iter().format("\n          "),
-                )
-                .into_boxed_str(),
-            ))
+        long,
+        long_help(Box::leak(
+        format ! (
+        "Alias for:\n--exclude {}\n ",
+        ATCODER_CRATES.iter().format("\n          "),
+        )
+        .into_boxed_str(),
+        ))
         )]
         exclude_atcoder_crates: bool,
 
         /// Alias for `--exclude {crates available on CodinGame}`
         #[structopt(
-            long,
-            long_help(Box::leak(
-                format!(
-                    "Alias for:\n--exclude {}\n ",
-                    CODINGAME_CRATES.iter().format("\n          "),
-                )
-                .into_boxed_str(),
-            ))
+        long,
+        long_help(Box::leak(
+        format ! (
+        "Alias for:\n--exclude {}\n ",
+        CODINGAME_CRATES.iter().format("\n          "),
+        )
+        .into_boxed_str(),
+        ))
         )]
         exclude_codingame_crates: bool,
 
         /// Do not include license and copyright notices for the users
         #[structopt(
-            long,
-            value_name("DOMAIN_AND_USERNAME"),
-            long_help(
-                concat!(
-                    indoc! {r#"
+        long,
+        value_name("DOMAIN_AND_USERNAME"),
+        long_help(
+        concat ! (
+        indoc ! {r#"
                         Do not include license and copyright notices for the users.
 
                         Supported formats:
                         * github.com/{username}
                         * gitlab.com/{username}
                     "#},
-                    ' ',
-                )
-            )
+        ' ',
+        )
+        )
         )]
         mine: Vec<User>,
 
@@ -154,12 +156,12 @@ pub enum Opt {
 
         /// Remove some part [possible values: docs, comments]
         #[structopt(
-            long,
-            value_name("REMOVE"),
-            possible_values(Remove::VARIANTS),
-            hide_possible_values(true),
-            long_help(concat!(
-                indoc! {r#"
+        long,
+        value_name("REMOVE"),
+        possible_values(Remove::VARIANTS),
+        hide_possible_values(true),
+        long_help(concat ! (
+        indoc ! {r#"
                     Removes
                     * doc comments (`//! ..`, `/// ..`, `/** .. */`, `#[doc = ".."]`) with `--remove docs`.
                     * comments (`// ..`, `/* .. */`) with `--remove comments`.
@@ -183,29 +185,29 @@ pub enum Opt {
                     }
                     ```
                 "#},
-                ' ',
-            ))
+        ' ',
+        ))
         )]
         remove: Vec<Remove>,
 
         /// Minify part of the output before emitting [default: none]  [possible values: none, libs, all]
         #[structopt(
-            long,
-            value_name("MINIFY"),
-            possible_values(Minify::VARIANTS),
-            hide_possible_values(true),
-            default_value("none"),
-            hide_default_value(true),
-            long_help(concat!(
-                indoc! {r#"
+        long,
+        value_name("MINIFY"),
+        possible_values(Minify::VARIANTS),
+        hide_possible_values(true),
+        default_value("none"),
+        hide_default_value(true),
+        long_help(concat ! (
+        indoc ! {r#"
                     Minifies
                     - each expaned library with `--minify lib`.
                     - the whole code with `--minify all`.
 
                     Not that the minification function is incomplete. Unnecessary spaces may be inserted.
                 "#},
-                ' ',
-            ))
+        ' ',
+        ))
         )]
         minify: Minify,
 
@@ -227,10 +229,10 @@ pub enum Opt {
 
         /// [Deprecated] Alias for `--minify`
         #[structopt(
-            long,
-            value_name("MINIFY"),
-            possible_values(Minify::VARIANTS),
-            default_value("none")
+        long,
+        value_name("MINIFY"),
+        possible_values(Minify::VARIANTS),
+        default_value("none")
         )]
         oneline: Minify,
 
@@ -292,7 +294,7 @@ impl FromStr for CrateSinglePath {
                 _ => Err(()),
             }
         })()
-        .map_err(|()| "expected `crate::$ident`")
+            .map_err(|()| "expected `crate::$ident`")
     }
 }
 
@@ -545,7 +547,7 @@ pub fn run(opt: Opt, ctx: Context<'_>) -> anyhow::Result<()> {
         &cache_dir,
         shell,
     )
-    .with_context(|| error_message("could not bundle the code"))?;
+        .with_context(|| error_message("could not bundle the code"))?;
 
     if !no_check {
         workspace::cargo_check_using_current_lockfile_and_cache(
@@ -555,7 +557,7 @@ pub fn run(opt: Opt, ctx: Context<'_>) -> anyhow::Result<()> {
             &exclude,
             &code,
         )
-        .with_context(|| error_message("the bundled code was not valid"))?;
+            .with_context(|| error_message("the bundled code was not valid"))?;
     }
 
     if let Some(output) = output {
@@ -840,9 +842,9 @@ fn bundle(
                             .into_iter()
                             .map(|(package_id, extern_crate_name)| {
                                 let (_, pseudo_extern_crate_name) =
-                                libs_to_bundle.get(package_id).with_context(|| {
-                                    "could not translate pseudo extern crate names. this is a bug"
-                                })?;
+                                    libs_to_bundle.get(package_id).with_context(|| {
+                                        "could not translate pseudo extern crate names. this is a bug"
+                                    })?;
                                 Ok((extern_crate_name, pseudo_extern_crate_name.clone()))
                             })
                             .collect::<anyhow::Result<_>>()?
@@ -875,13 +877,6 @@ fn bundle(
         .collect::<anyhow::Result<Vec<(&str, (&cm::Package, String, String, String))>>>()?;
 
     if !libs.is_empty() {
-        if !root_crate.package().authors.is_empty() {
-            shell.warn(
-                "`package.authors` are no longer used to skip Copyright and License Notices",
-            )?;
-            shell.warn("instead, add `--mine github.com/{your username}` to the arguments")?;
-        }
-
         code = rust::insert_prelude_for_main_crate(&code, cargo_equip_mod_name)?;
 
         code =
@@ -897,7 +892,7 @@ fn bundle(
                 doc: &mut String,
                 title: &str,
                 cargo_equip_mod_name: &syn::Ident,
-                contents: impl Iterator<Item = (Option<&'a str>, &'a cm::Package)>,
+                contents: impl Iterator<Item=(Option<&'a str>, &'a cm::Package)>,
             ) {
                 let mut table = Table::new();
 
@@ -921,12 +916,6 @@ fn bundle(
                             cell!("published in **missing**")
                         });
                     }
-
-                    row.add_cell(if let Some(license) = &package.license {
-                        cell!(format!("licensed under `{}`", license))
-                    } else {
-                        cell!("licensed under **missing**")
-                    });
 
                     if let Some(pseudo_extern_crate_name) = pseudo_extern_crate_name {
                         row.add_cell(cell!(format!(
@@ -969,50 +958,6 @@ fn bundle(
                     .filter(|(_, (p, _, _, _))| p.has_proc_macro())
                     .map(|(_, (p, _, _, _))| (None, *p)),
             );
-
-            let notices = libs
-                .iter()
-                .filter(|(_, (p, _, _, _))| p.has_lib())
-                .map(|(_, (p, _, _, _))| p)
-                .flat_map(|lib_package| {
-                    if let Err(err) =
-                        shell.status("Checking", format!("the license of `{}`", lib_package.id))
-                    {
-                        return Some(Err(err.into()));
-                    }
-                    match lib_package.read_license_text(mine, cache_dir) {
-                        Ok(Some(license_text)) => Some(Ok((&lib_package.id, license_text))),
-                        Ok(None) => None,
-                        Err(err) => Some(Err(err)),
-                    }
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-
-            if !notices.is_empty() {
-                doc += "\n # License and Copyright Notices\n";
-                for (package_id, license_text) in notices {
-                    doc += &format!("\n - `{}`\n\n", package_id);
-                    let backquotes = {
-                        let (mut n, mut m) = (2, None);
-                        for c in license_text.chars() {
-                            if c == '`' {
-                                m = Some(m.unwrap_or(0) + 1);
-                            } else if let Some(m) = m.take() {
-                                n = cmp::max(n, m);
-                            }
-                        }
-                        "`".repeat(cmp::max(n, m.unwrap_or(0)) + 1)
-                    };
-                    doc += &format!("     {}text\n", backquotes);
-                    for line in license_text.lines() {
-                        match line {
-                            "" => doc += "\n",
-                            line => doc += &format!("     {}\n", line),
-                        }
-                    }
-                    doc += &format!("     {}\n", backquotes);
-                }
-            }
 
             doc
         };
@@ -1170,8 +1115,8 @@ fn normal_non_host_dep_graph<'cm>(
             {
                 if *from_pkg != to
                     && dep_kinds
-                        .iter()
-                        .any(|cm::DepKindInfo { kind, .. }| *kind == cm::DependencyKind::Normal)
+                    .iter()
+                    .any(|cm::DepKindInfo { kind, .. }| *kind == cm::DependencyKind::Normal)
                     && libs_to_bundle.contains_key(to)
                 {
                     graph.add_edge(indices[to], indices[*from_pkg], ());
