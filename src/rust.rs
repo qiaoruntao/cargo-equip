@@ -372,11 +372,23 @@ impl<'opt> CodeEdit<'opt> {
                             src_path.with_file_name(&ident.to_string()).join("mod.rs"),
                         ]
                     } else {
+                        let filename = src_path.file_name().unwrap().replace(".rs","");
+
                         vec![
+                            src_path
+                                .with_extension("")
+                                .join(&filename)
+                                .with_file_name(&ident.to_string())
+                                .with_extension("rs"),
                             src_path
                                 .with_extension("")
                                 .with_file_name(&ident.to_string())
                                 .with_extension("rs"),
+                            src_path
+                                .with_extension("")
+                                .join(&filename)
+                                .with_file_name(&ident.to_string())
+                                .join("mod.rs"),
                             src_path
                                 .with_extension("")
                                 .with_file_name(&ident.to_string())
